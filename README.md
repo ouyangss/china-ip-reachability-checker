@@ -1,8 +1,11 @@
 # China IP Reachability Checker
 
 服务器 IP 国内连通性检测 + 自动换 IP Bash 脚本。
+
 本项目运用BOCE（boce.com）的API进行国内连通性PING检测，该API运用需要花费到BOCE官方余额（即波点），请自行注册BOCE账户并获取波点。
+
 通过 【https://www.boce.com/?k=KwKHRgtLPU】 注册可获取1W波点。
+
 IP 国内连通性检测也可以替换为其他同类项目，请自行修改。
 
 ## 功能
