@@ -1,0 +1,14 @@
+# Runtime state/logs
+*.log
+fail_count
+
+# Local secrets/config copies
+.env
+*.env
+*.local
+config.local.*
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
