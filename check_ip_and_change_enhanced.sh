@@ -9,7 +9,7 @@ set -euo pipefail
 # 1. 获取当前服务器公网 IPv4
 # 2. 做简单 GFW / 出口环境检测
 # 3. 使用 Boce API 从中国大陆节点 ping 指定域名，按丢包率判断国内连通性
-# 4. 连续失败达到阈值后，调用接口更换 IP
+# 4. 本轮检测失败达到阈值后，调用接口更换 IP
 # 5. 换 IP 后等待网络恢复，重新获取新 IP 并复测
 # 6. 支持可选 Webhook 通知
 # ============================================================
@@ -41,8 +41,10 @@ BOCE_PACKET_LOSS_THRESHOLD=70
 # curl 超时时间，单位：秒
 CURL_TIMEOUT=20
 
-# 连续失败多少次才更换 IP
-FAIL_THRESHOLD=3
+# 本轮失败多少次才更换 IP。
+# 注意：脚本不再跨运行保留失败计数；每次运行都会从 0 开始。
+# 默认 1 表示本轮检测判定国内不可达后立即调用换 IP 接口。
+FAIL_THRESHOLD=1
 
 # 每次失败检测之间等待多久，单位：秒
 RETRY_INTERVAL=20
@@ -52,7 +54,6 @@ WAIT_AFTER_CHANGE=60
 
 # 状态与日志文件
 STATE_DIR='/var/lib/ip_reachability_checker'
-STATE_FILE="$STATE_DIR/fail_count"
 LOG_FILE='/var/log/ip_reachability_checker.log'
 
 # 可选通知 Webhook。
@@ -108,18 +109,14 @@ require_cmd() {
 }
 
 read_fail_count() {
-    if [[ -f "$STATE_FILE" ]]; then
-        local n
-        n="$(tr -dc '0-9' < "$STATE_FILE" || true)"
-        echo "${n:-0}"
-    else
-        echo "0"
-    fi
+    # 不再读取持久化状态：每次脚本运行都从 0 开始。
+    echo "${FAIL_COUNT_THIS_RUN:-0}"
 }
 
 write_fail_count() {
     local n="$1"
-    echo "$n" > "$STATE_FILE"
+    # 只保留本次运行内的内存计数，不写入磁盘。
+    FAIL_COUNT_THIS_RUN="$n"
 }
 
 reset_fail_count() {
@@ -127,11 +124,9 @@ reset_fail_count() {
 }
 
 increase_fail_count() {
-    local old
-    old="$(read_fail_count)"
-    local new=$((old + 1))
-    write_fail_count "$new"
-    echo "$new"
+    # 不累计历史失败；本次检测失败只记为 1。
+    write_fail_count 1
+    echo 1
 }
 
 capture_check_rc() {
@@ -415,7 +410,8 @@ check_cn_reachability() {
 # =========================
 #
 # Boce API 调用需要耗费余额，因此脚本不在单次运行内重复创建检测任务。
-# 连续失败确认由 STATE_FILE 中的失败计数承担：每次 cron 运行最多创建一次任务、获取一次结果。
+# 脚本不跨运行保留失败计数：每次 cron 运行最多创建一次任务、获取一次结果。
+# 如果需要检测失败后立即更换 IP，请保持 FAIL_THRESHOLD=1。
 
 
 # =========================
@@ -494,6 +490,7 @@ main() {
     require_cmd mktemp
 
     ensure_dirs
+    reset_fail_count
 
     log '========== 开始检测 =========='
 
@@ -514,35 +511,40 @@ main() {
     if (( cn_rc == 0 )); then
         log '当前 IP 国内可达，不需要更换。'
         reset_fail_count
-        log '连续失败计数已清零。'
+        log '本轮失败计数已清零。'
         log '========== 检测结束 =========='
         exit 0
     fi
 
     if (( cn_rc == 2 )); then
-        log '检测异常/结果矛盾，安全起见本轮不换 IP，也不增加失败计数。'
+        reset_fail_count
+        log '检测异常/结果矛盾，安全起见本轮不换 IP，失败计数已清零。'
         log '========== 检测结束 =========='
         exit 0
     fi
 
     local fail_count
     fail_count="$(increase_fail_count)"
-    log "当前 IP 国内不可达，连续失败计数: $fail_count/$FAIL_THRESHOLD"
+    log "当前 IP 国内不可达，本轮失败计数: $fail_count/$FAIL_THRESHOLD"
 
     if (( fail_count < FAIL_THRESHOLD )); then
-        log '尚未达到更换 IP 阈值，本轮不换 IP。'
+        reset_fail_count
+        log '尚未达到更换 IP 阈值，本轮不换 IP，失败计数已清零。'
         log '========== 检测结束 =========='
         exit 0
     fi
 
-    log '连续失败计数已达到阈值，开始调用更换 IP 接口。'
-    log '为避免重复消耗 Boce 余额，本轮不再做额外确认；连续确认由定时任务失败计数承担。'
+    log '本轮失败计数已达到阈值，开始调用更换 IP 接口。'
+    log '为避免重复消耗 Boce 余额，本轮不再做额外确认；脚本不会跨运行保留失败计数。'
 
     if change_ip; then
         post_change_recheck || true
     else
-        log '更换 IP 失败，保留失败计数，等待下次任务继续检测。'
+        reset_fail_count
+        log '更换 IP 失败，失败计数已清零，等待下次任务重新检测。'
     fi
+
+    reset_fail_count
 
     log '========== 检测结束 =========='
 }
